@@ -45,6 +45,9 @@ class DashboardStats(BaseModel):
     top_products: List[Dict[str, Any]] = []
     recent_movements: List[Dict[str, Any]] = []
     stock_by_category: List[Dict[str, Any]] = []
+    # Pending transfers so dashboard shows incoming/outgoing as soon as they are added
+    pending_incoming_list: List[Dict[str, Any]] = []
+    pending_outgoing_list: List[Dict[str, Any]] = []
 
 
 class PartnerResponse(BaseModel):

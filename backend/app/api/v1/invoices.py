@@ -5,6 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, Query
 from fastapi.responses import Response
 
+from app.core.roles import require_controller_role
 from app.models.invoice import InvoiceCreate, InvoiceListResponse, InvoiceResponse
 from app.models.common import APIResponse
 from app.services.invoice_service import get_invoice_service
@@ -78,7 +79,8 @@ def create_invoice(data: InvoiceCreate):
 
 @router.post("/{invoice_id}/confirm", response_model=APIResponse)
 def confirm_invoice(invoice_id: int):
-    """Confirm/post an invoice."""
+    """Confirm/post an invoice (controller or admin role required)."""
+    require_controller_role()
     service = get_invoice_service()
     invoice = service.confirm_invoice(invoice_id)
     return APIResponse(data=invoice, message="Invoice confirmed successfully")
@@ -86,7 +88,8 @@ def confirm_invoice(invoice_id: int):
 
 @router.post("/{invoice_id}/cancel", response_model=APIResponse)
 def cancel_invoice(invoice_id: int):
-    """Cancel an invoice."""
+    """Cancel an invoice (controller or admin role required)."""
+    require_controller_role()
     service = get_invoice_service()
     invoice = service.cancel_invoice(invoice_id)
     return APIResponse(data=invoice, message="Invoice cancelled successfully")

@@ -4,6 +4,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Query
 
+from app.core.roles import require_controller_role
 from app.models.stock import (
     StockAdjustment,
     StockMovementListResponse,
@@ -83,6 +84,38 @@ def get_warehouses():
     service = get_stock_service()
     warehouses = service.get_warehouses()
     return {"success": True, "data": warehouses}
+
+
+@router.post("/setup-warehouse", response_model=APIResponse)
+def setup_markwave_warehouse():
+    """Create Markwave warehouse in Odoo if it does not exist (controller/admin only).
+    This creates the warehouse and its locations so incoming/outgoing shipments work.
+    """
+    require_controller_role()
+    service = get_stock_service()
+    result = service.setup_markwave_warehouse()
+    return APIResponse(
+        data=result,
+        message=result.get("message", "Warehouse setup complete"),
+    )
+
+
+@router.post("/pickings/{picking_id}/confirm", response_model=APIResponse)
+def confirm_picking(picking_id: int):
+    """Confirm a draft picking (controller or admin role required)."""
+    require_controller_role()
+    service = get_stock_service()
+    picking = service.confirm_picking(picking_id)
+    return APIResponse(data=picking, message="Picking confirmed successfully")
+
+
+@router.post("/pickings/{picking_id}/validate", response_model=APIResponse)
+def validate_picking(picking_id: int):
+    """Validate a picking (set to done, update stock) (controller or admin role required)."""
+    require_controller_role()
+    service = get_stock_service()
+    picking = service.validate_picking(picking_id)
+    return APIResponse(data=picking, message="Picking validated successfully")
 
 
 @router.get("/pickings")

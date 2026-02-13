@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     # Odoo REST API (direct HTTP endpoint for live product data)
     ODOO_REST_API_URL: str = ""
 
+    # When True, products and stock are fetched only from Odoo (XML-RPC) so the frontend shows exact Odoo data.
+    # When False, the Markwave REST API is tried first, then Odoo as fallback.
+    PREFER_ODOO_FOR_PRODUCTS: bool = False
+
+    # Markwave company in Odoo (used to filter products when using XML-RPC)
+    ODOO_MARKWAVE_COMPANY_ID: int = 2
+
     # PostgreSQL
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
@@ -38,6 +45,9 @@ class Settings(BaseSettings):
 
     # Rate Limiting
     RATE_LIMIT_PER_MINUTE: int = 60
+
+    # App user role: viewer (read-only), controller (can accept draft & update state), admin (full)
+    APP_USER_ROLE: str = "admin"
 
     @property
     def allowed_origins_list(self) -> List[str]:

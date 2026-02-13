@@ -15,7 +15,7 @@ from app.models.product import (
     ProductUpdate,
 )
 from app.services.odoo_client import get_odoo_client
-from app.utils.odoo_helpers import odoo_str, odoo_float
+from app.utils.odoo_helpers import odoo_str, odoo_float, odoo_m2o_name
 
 logger = get_logger(__name__)
 
@@ -31,25 +31,50 @@ STOCK_FIELDS = [
 ]
 
 
+def _first(*keys: str, d: Dict[str, Any], default: Any = None) -> Any:
+    """Return the first present value for the given keys in d."""
+    for k in keys:
+        if k in d and d[k] is not None and d[k] is not False:
+            return d[k]
+    return default
+
+
+def _is_storable_product(item: Dict[str, Any]) -> bool:
+    """Only storable products (type=product). Exclude Down Payment and non-storable."""
+    ptype = (item.get("type") or "").strip().lower() if isinstance(item.get("type"), str) else ""
+    if ptype != "product":
+        return False
+    name = (item.get("name") or "").lower() if isinstance(item.get("name"), str) else ""
+    if "down payment" in name or "downpayment" in name:
+        return False
+    return True
+
+
 def _map_rest_product(item: Dict[str, Any]) -> ProductResponse:
     """Map a product record from the Odoo REST API to ProductResponse.
 
-    The REST API uses slightly different field names:
-      - ``lst_price`` instead of ``list_price``
-      - ``default_code`` may be JSON ``false`` instead of ``null``
-      - ``product_tmpl_id`` is a ``[id, name]`` tuple
+    Handles multiple possible field names (e.g. lst_price / list_price / 1st_price,
+    name / product_name / Name) so different API response shapes still display.
     """
+    if not isinstance(item, dict):
+        return ProductResponse(id=0, name="", default_code=None, barcode=None, list_price=0.0, standard_price=0.0, qty_available=0.0, virtual_available=0.0, categ_id=None, categ_name=None, uom_id=None, uom_name=None, type=None, image_url=None, hs_code=None, weight=None, volume=None, active=True, description=None, currency_id=None)
+    name = _first("name", "product_name", "Name", d=item) or ""
+    if not name and isinstance(item.get("product_tmpl_id"), (list, tuple)) and len(item.get("product_tmpl_id", [])) > 1:
+        name = str(item["product_tmpl_id"][1])
+    if not name and item.get("barcode"):
+        name = f"Product {item.get('barcode')}"
+    list_price_val = _first("lst_price", "list_price", "1st_price", d=item)
     return ProductResponse(
-        id=item.get("id", 0),
-        name=item.get("name") or "",
-        default_code=odoo_str(item.get("default_code")),
+        id=int(item.get("id", 0)) if item.get("id") is not None else 0,
+        name=name,
+        default_code=odoo_str(_first("default_code", "sku", "code", d=item)),
         barcode=odoo_str(item.get("barcode")),
-        list_price=odoo_float(item.get("lst_price", item.get("list_price"))),
+        list_price=odoo_float(list_price_val),
         standard_price=odoo_float(item.get("standard_price")),
         qty_available=odoo_float(item.get("qty_available")),
         virtual_available=odoo_float(item.get("virtual_available")),
         categ_id=None,
-        categ_name=None,
+        categ_name=odoo_str(_first("categ_name", "category", d=item)) or odoo_m2o_name(item.get("categ_id")),
         uom_id=None,
         uom_name=None,
         type=odoo_str(item.get("type")),
@@ -95,10 +120,16 @@ class ProductService:
             resp.raise_for_status()
             payload = resp.json()
 
-            all_items: List[Dict[str, Any]] = payload.get("data", [])
-            total = payload.get("count", len(all_items))
+            # API may return {"data": [...], "count": N} or a top-level list
+            if isinstance(payload, list):
+                all_items = [p for p in payload if isinstance(p, dict)]
+            else:
+                all_items = list(payload.get("data", [])) if isinstance(payload, dict) else []
+            # Only storable products (exclude Down Payment, service, consu)
+            all_items = [p for p in all_items if _is_storable_product(p)]
+            total = len(all_items)
 
-            # Apply pagination on our side (the REST API returns all records)
+            # Apply pagination on our side
             page = all_items[offset: offset + limit]
             products = [_map_rest_product(item) for item in page]
 
@@ -131,16 +162,21 @@ class ProductService:
     ) -> Tuple[List[ProductResponse], int]:
         """Get paginated list of products.
 
-        Uses the Odoo REST API as the primary source for real-time data.
-        Falls back to XML-RPC if the REST API is unavailable.
+        When PREFER_ODOO_FOR_PRODUCTS is True, fetches only from Odoo (exact Odoo data).
+        Otherwise tries the Markwave REST API first, then falls back to Odoo XML-RPC.
         """
-        # Try the fast REST API first
-        rest_result = self._get_products_from_rest_api(offset=offset, limit=limit)
-        if rest_result is not None:
-            return rest_result
+        if not get_settings().PREFER_ODOO_FOR_PRODUCTS:
+            rest_result = self._get_products_from_rest_api(offset=offset, limit=limit)
+            if rest_result is not None:
+                return rest_result
 
-        # Fallback: XML-RPC
-        domain = [("active", "=", True)] if active_only else []
+        # Odoo XML-RPC: only storable products (type=product), Markwave company
+        domain: List[Any] = [
+            ("company_id", "=", get_settings().ODOO_MARKWAVE_COMPANY_ID),
+            ("type", "=", "product"),
+        ]
+        if active_only:
+            domain.append(("active", "=", True))
 
         total = self.client.search_count(self.model, domain)
         records = self.client.search_read(
@@ -211,8 +247,11 @@ class ProductService:
         return self.client.write(self.model, [product_id], {"active": False})
 
     def search_products(self, search: ProductSearchRequest) -> Tuple[List[ProductResponse], int]:
-        """Advanced product search with filters."""
-        domain: List[Any] = []
+        """Advanced product search with filters (Markwave only, storable products only)."""
+        domain: List[Any] = [
+            ("company_id", "=", get_settings().ODOO_MARKWAVE_COMPANY_ID),
+            ("type", "=", "product"),
+        ]
 
         if search.active_only:
             domain.append(("active", "=", True))
@@ -276,8 +315,14 @@ class ProductService:
             resp.raise_for_status()
             payload = resp.json()
 
-            all_items: List[Dict[str, Any]] = payload.get("data", [])
-            total = payload.get("count", len(all_items))
+            # API may return {"data": [...], "count": N} or a top-level list
+            if isinstance(payload, list):
+                all_items = [p for p in payload if isinstance(p, dict)]
+            else:
+                all_items = list(payload.get("data", [])) if isinstance(payload, dict) else []
+            # Only storable products (exclude Down Payment, service, consu)
+            all_items = [p for p in all_items if _is_storable_product(p)]
+            total = len(all_items)
 
             page = all_items[offset: offset + limit]
             stock_info: List[ProductStockInfo] = []
@@ -321,12 +366,17 @@ class ProductService:
         Uses the Odoo REST API as the primary source.
         Falls back to XML-RPC if unavailable.
         """
-        rest_result = self._get_stock_from_rest_api(offset=offset, limit=limit)
-        if rest_result is not None:
-            return rest_result
+        if not get_settings().PREFER_ODOO_FOR_PRODUCTS:
+            rest_result = self._get_stock_from_rest_api(offset=offset, limit=limit)
+            if rest_result is not None:
+                return rest_result
 
-        # Fallback: XML-RPC
-        domain = [("type", "=", "product"), ("active", "=", True)]
+        # Odoo XML-RPC (exact Odoo data; Markwave only)
+        domain = [
+            ("company_id", "=", get_settings().ODOO_MARKWAVE_COMPANY_ID),
+            ("type", "=", "product"),
+            ("active", "=", True),
+        ]
 
         total = self.client.search_count(self.model, domain)
         records = self.client.search_read(
